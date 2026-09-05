@@ -97,10 +97,17 @@ export default function App() {
       const created = await api.createCampaign({
         name: newCmp.name,
         tag: newCmp.tag || 'Marketing',
-        template_id: primaryTemplateId,
-        template_ids: templateIds.length ? templateIds : (primaryTemplateId ? [primaryTemplateId] : []),
-        account_id: accountId && accountId > 0 ? accountId : null,
-        lead_ids: leads.map(l => typeof l.id === 'number' ? l.id : parseInt(String(l.id).replace(/\D/g, ''), 10)).filter((n: number) => !Number.isNaN(n))
+        templateId: primaryTemplateId,
+        templateIds: templateIds.length ? templateIds : (primaryTemplateId ? [primaryTemplateId] : []),
+        accountId: accountId && accountId > 0 ? accountId : null,
+        leadIds: leads.map(l => typeof l.id === 'number' ? l.id : parseInt(String(l.id).replace(/\D/g, ''), 10)).filter((n: number) => !Number.isNaN(n)),
+        delaySeconds: newCmp.delaySeconds ?? 30,
+        useJitter: newCmp.useJitter !== false,
+        jitterSeconds: newCmp.useJitter === false ? 0 : 2,
+        maxRetries: newCmp.maxRetries ?? 3,
+        rotationMode: newCmp.rotationMode || 'round_robin',
+        replyTo: newCmp.replyTo || '',
+        deliveryRoute: newCmp.deliveryRoute || 'auto',
       });
 
       // If user chose Start Campaign, set running after create
