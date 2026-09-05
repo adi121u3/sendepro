@@ -58,45 +58,76 @@ export default function App() {
     });
   }, []);
 
-  // Campaign status update
   const handleUpdateCampaignStatus = async (id: string, status: Campaign['status']) => {
     try {
-      const numericId = parseInt(id.replace(/\D/g, ''), 10) || Number(id);
+      const numericId = parseInt(String(id).replace(/\D/g, ''), 10) || Number(id);
       await api.updateCampaignStatus(numericId, status);
       await loadData();
-    } catch (e) {
+    } catch (e: any) {
       console.error("Failed to update campaign status:", e);
+      alert(e.message || 'Failed to update campaign status');
     }
   };
 
-  const handleCreateCampaign = async (newCmp: Omit<Campaign, 'id' | 'sentCount' | 'failedCount' | 'createdAt'>) => {
+  const handleDeleteCampaign = async (id: string) => {
     try {
-      await api.createCampaign({
+      const numericId = parseInt(String(id).replace(/\D/g, ''), 10) || Number(id);
+      await api.deleteCampaign(numericId);
+      await loadData();
+    } catch (e: any) {
+      console.error("Failed to delete campaign:", e);
+      alert(e.message || 'Failed to delete campaign');
+    }
+  };
+
+  const handleCreateCampaign = async (newCmp: any) => {
+    try {
+      const templateIds = (newCmp.templateIds || [])
+        .map((tid: string | number) => parseInt(String(tid).replace(/\D/g, ''), 10))
+        .filter((n: number) => !Number.isNaN(n) && n > 0);
+
+      const primaryTemplateId = newCmp.templateId
+        ? parseInt(String(newCmp.templateId).replace(/\D/g, ''), 10)
+        : templateIds[0] || null;
+
+      const accountId = newCmp.accountId
+        ? parseInt(String(newCmp.accountId).replace(/\D/g, ''), 10)
+        : null;
+
+      const created = await api.createCampaign({
         name: newCmp.name,
-        template_id: newCmp.templateId ? parseInt(String(newCmp.templateId).replace(/\D/g, ''), 10) : null,
-        account_id: newCmp.accountId ? parseInt(String(newCmp.accountId).replace(/\D/g, ''), 10) : null,
-        lead_ids: leads.map(l => typeof l.id === 'number' ? l.id : parseInt(String(l.id).replace(/\D/g, ''), 10))
+        tag: newCmp.tag || 'Marketing',
+        template_id: primaryTemplateId,
+        template_ids: templateIds.length ? templateIds : (primaryTemplateId ? [primaryTemplateId] : []),
+        account_id: accountId && accountId > 0 ? accountId : null,
+        lead_ids: leads.map(l => typeof l.id === 'number' ? l.id : parseInt(String(l.id).replace(/\D/g, ''), 10)).filter((n: number) => !Number.isNaN(n))
       });
+
+      // If user chose Start Campaign, set running after create
+      if (newCmp.status === 'running' && created?.id) {
+        await api.updateCampaignStatus(created.id, 'running');
+      }
+
       await loadData();
       setCurrentTab('campaigns');
-    } catch (e) {
+    } catch (e: any) {
       console.error("Failed to create campaign:", e);
-      alert("Failed to create campaign on backend.");
+      alert(e.message || "Failed to create campaign on backend.");
     }
   };
 
   const handleAddAccount = async (acc: Omit<Account, 'id' | 'sentToday' | 'status' | 'lastTested'>) => {
     try {
       await api.createAccount({
-        provider: acc.providerType || acc.provider || 'smtp',
+        provider: (acc as any).providerType || (acc as any).provider || 'smtp',
         name: acc.name,
-        email: acc.fromEmail || acc.email,
+        email: acc.fromEmail || (acc as any).email,
         from_name: acc.fromName,
         smtp_host: (acc as any).host,
         smtp_port: (acc as any).port,
         smtp_security: (acc as any).security,
-        smtp_username: (acc as any).username || acc.fromEmail || acc.email,
-        enabled: acc.enabled,
+        smtp_username: (acc as any).username || acc.fromEmail || (acc as any).email,
+        enabled: (acc as any).enabled,
         daily_limit: acc.dailyLimit,
         smtp_password: (acc as any).smtpPassword || (acc as any).password,
         zeptomail_api_key: (acc as any).apiKey
@@ -296,6 +327,7 @@ export default function App() {
               leads={leads}
               onUpdateCampaignStatus={handleUpdateCampaignStatus}
               onCreateCampaign={handleCreateCampaign}
+              onDeleteCampaign={handleDeleteCampaign}
             />
           )}
 
