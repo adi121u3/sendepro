@@ -16,6 +16,17 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
 
+
+def _add_column_if_missing(connection, table: str, column: str, col_type: str):
+    result = connection.execute(text(f"PRAGMA table_info({table});"))
+    columns = [row[1] for row in result.fetchall()]
+    if not columns:
+        return
+    if column not in columns:
+        connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type};"))
+        logger.info("Migrated table %s: added %s column", table, column)
+
+
 def init_db():
     """Initialize database tables, run safe column migrations for SQLite, and verify connection."""
     try:
@@ -26,70 +37,36 @@ def init_db():
         if "sqlite" in settings.database_url:
             with engine.connect() as connection:
                 # Accounts table migration
-                result = connection.execute(text("PRAGMA table_info(accounts);"))
-                columns = [row[1] for row in result.fetchall()]
-                
-                if "smtp_host" not in columns:
-                    connection.execute(text("ALTER TABLE accounts ADD COLUMN smtp_host VARCHAR(255);"))
-                    logger.info("Migrated table accounts: added smtp_host column")
-                if "smtp_port" not in columns:
-                    connection.execute(text("ALTER TABLE accounts ADD COLUMN smtp_port INTEGER DEFAULT 587;"))
-                    logger.info("Migrated table accounts: added smtp_port column")
-                if "smtp_security" not in columns:
-                    connection.execute(text("ALTER TABLE accounts ADD COLUMN smtp_security VARCHAR(50) DEFAULT 'starttls';"))
-                    logger.info("Migrated table accounts: added smtp_security column")
-                if "smtp_username" not in columns:
-                    connection.execute(text("ALTER TABLE accounts ADD COLUMN smtp_username VARCHAR(255);"))
-                    logger.info("Migrated table accounts: added smtp_username column")
+                _add_column_if_missing(connection, "accounts", "smtp_host", "VARCHAR(255)")
+                _add_column_if_missing(connection, "accounts", "smtp_port", "INTEGER DEFAULT 587")
+                _add_column_if_missing(connection, "accounts", "smtp_security", "VARCHAR(50) DEFAULT 'starttls'")
+                _add_column_if_missing(connection, "accounts", "smtp_username", "VARCHAR(255)")
 
-                # Campaigns table migration
-                campaigns_res = connection.execute(text("PRAGMA table_info(campaigns);"))
-                campaigns_cols = [row[1] for row in campaigns_res.fetchall()]
-                if campaigns_cols and "tag" not in campaigns_cols:
-                    connection.execute(text("ALTER TABLE campaigns ADD COLUMN tag VARCHAR(50) DEFAULT 'Marketing';"))
-                    logger.info("Migrated table campaigns: added tag column")
+                # Campaigns table migration — pacing / delivery (desktop parity)
+                _add_column_if_missing(connection, "campaigns", "tag", "VARCHAR(50) DEFAULT 'Marketing'")
+                _add_column_if_missing(connection, "campaigns", "delay_seconds", "INTEGER DEFAULT 30")
+                _add_column_if_missing(connection, "campaigns", "jitter_seconds", "INTEGER DEFAULT 2")
+                _add_column_if_missing(connection, "campaigns", "max_retries", "INTEGER DEFAULT 3")
+                _add_column_if_missing(connection, "campaigns", "rotation_mode", "VARCHAR(50) DEFAULT 'round_robin'")
+                _add_column_if_missing(connection, "campaigns", "reply_to", "VARCHAR(255)")
+                _add_column_if_missing(connection, "campaigns", "delivery_route", "VARCHAR(50) DEFAULT 'auto'")
 
                 # Drafts table check & migration
-                drafts_res = connection.execute(text("PRAGMA table_info(drafts);"))
-                drafts_cols = [row[1] for row in drafts_res.fetchall()]
-                if drafts_cols:
-                    if "from_name" not in drafts_cols:
-                        connection.execute(text("ALTER TABLE drafts ADD COLUMN from_name VARCHAR(255);"))
-                        logger.info("Migrated table drafts: added from_name column")
-                    if "attachments" not in drafts_cols:
-                        connection.execute(text("ALTER TABLE drafts ADD COLUMN attachments TEXT;"))
-                        logger.info("Migrated table drafts: added attachments column")
+                _add_column_if_missing(connection, "drafts", "from_name", "VARCHAR(255)")
+                _add_column_if_missing(connection, "drafts", "attachments", "TEXT")
 
                 # Leads table check & migration
-                leads_res = connection.execute(text("PRAGMA table_info(leads);"))
-                leads_cols = [row[1] for row in leads_res.fetchall()]
-                if leads_cols:
-                    if "sender_name" not in leads_cols:
-                        connection.execute(text("ALTER TABLE leads ADD COLUMN sender_name VARCHAR(100);"))
-                        logger.info("Migrated table leads: added sender_name column")
-                    if "sender_full_name" not in leads_cols:
-                        connection.execute(text("ALTER TABLE leads ADD COLUMN sender_full_name VARCHAR(100);"))
-                        logger.info("Migrated table leads: added sender_full_name column")
+                _add_column_if_missing(connection, "leads", "sender_name", "VARCHAR(100)")
+                _add_column_if_missing(connection, "leads", "sender_full_name", "VARCHAR(100)")
 
                 # Activity logs table check & migration
-                logs_res = connection.execute(text("PRAGMA table_info(activity_logs);"))
-                logs_cols = [row[1] for row in logs_res.fetchall()]
-                if logs_cols:
-                    if "lead_email" not in logs_cols:
-                        connection.execute(text("ALTER TABLE activity_logs ADD COLUMN lead_email VARCHAR(255);"))
-                    if "account_name" not in logs_cols:
-                        connection.execute(text("ALTER TABLE activity_logs ADD COLUMN account_name VARCHAR(100);"))
-                    if "status" not in logs_cols:
-                        connection.execute(text("ALTER TABLE activity_logs ADD COLUMN status VARCHAR(50) DEFAULT 'SENT';"))
-                    if "provider_type" not in logs_cols:
-                        connection.execute(text("ALTER TABLE activity_logs ADD COLUMN provider_type VARCHAR(50);"))
-                    if "provider_message_id" not in logs_cols:
-                        connection.execute(text("ALTER TABLE activity_logs ADD COLUMN provider_message_id VARCHAR(255);"))
-                    if "error_code" not in logs_cols:
-                        connection.execute(text("ALTER TABLE activity_logs ADD COLUMN error_code VARCHAR(50);"))
-                    if "campaign_id" not in logs_cols:
-                        connection.execute(text("ALTER TABLE activity_logs ADD COLUMN campaign_id INTEGER;"))
-                        logger.info("Migrated table activity_logs: added extended logging columns")
+                _add_column_if_missing(connection, "activity_logs", "lead_email", "VARCHAR(255)")
+                _add_column_if_missing(connection, "activity_logs", "account_name", "VARCHAR(100)")
+                _add_column_if_missing(connection, "activity_logs", "status", "VARCHAR(50) DEFAULT 'SENT'")
+                _add_column_if_missing(connection, "activity_logs", "provider_type", "VARCHAR(50)")
+                _add_column_if_missing(connection, "activity_logs", "provider_message_id", "VARCHAR(255)")
+                _add_column_if_missing(connection, "activity_logs", "error_code", "VARCHAR(50)")
+                _add_column_if_missing(connection, "activity_logs", "campaign_id", "INTEGER")
 
                 connection.commit()
 
