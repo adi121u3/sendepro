@@ -38,6 +38,18 @@ def _microsoft_authority() -> str:
     tenant_id = os.getenv("MICROSOFT_TENANT_ID", "common").strip() or "common"
     return f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0"
 
+
+# Microsoft scopes required for SMTP + XOAUTH2 delivery and basic profile.
+# SMTP.Send is what allows the real MIME From header (including display name)
+# to reach recipients. Mail.Send is kept for any Graph-based features.
+MICROSOFT_SCOPES = (
+    "https://outlook.office.com/SMTP.Send "
+    "https://graph.microsoft.com/Mail.Send "
+    "https://graph.microsoft.com/User.Read "
+    "offline_access"
+)
+
+
 @router.get("/authorize")
 def oauth_authorize(provider: str = Query(..., description="google or microsoft")):
     """Initiates browser-based OAuth2 authorization flow for Gmail or Microsoft 365."""
@@ -61,7 +73,7 @@ def oauth_authorize(provider: str = Query(..., description="google or microsoft"
             "client_id": _required_client_id("microsoft"),
             "redirect_uri": redirect_uri,
             "response_type": "code",
-            "scope": "https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access",
+            "scope": MICROSOFT_SCOPES,
             "prompt": "consent",
             "state": "microsoft",
         })
@@ -99,15 +111,20 @@ def oauth_callback(
             if provider == "google"
             else _microsoft_authority() + "/token"
         )
+        token_data_payload = {
+            "code": code,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uri": redirect_uri,
+            "grant_type": "authorization_code",
+        }
+        # Explicitly request SMTP scope on token exchange for Microsoft
+        if provider == "microsoft":
+            token_data_payload["scope"] = MICROSOFT_SCOPES
+
         token_response = requests.post(
             token_url,
-            data={
-                "code": code,
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "redirect_uri": redirect_uri,
-                "grant_type": "authorization_code",
-            },
+            data=token_data_payload,
             timeout=20,
         )
         if not token_response.ok:
