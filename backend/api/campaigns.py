@@ -68,6 +68,40 @@ def create_campaign(payload: CampaignCreate, db: Session = Depends(get_db)):
 
     return CampaignResponse.from_orm(campaign)
 
+
+@router.delete("/{campaign_id}", status_code=status.HTTP_200_OK)
+def delete_campaign(campaign_id: int, db: Session = Depends(get_db)):
+    campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    # Stop worker if running
+    try:
+        CampaignEngine.stop_campaign(campaign.id)
+    except Exception:
+        pass
+
+    name = campaign.name
+
+    # Recipients cascade via relationship if configured; delete explicitly for safety
+    db.query(CampaignRecipient).filter(
+        CampaignRecipient.campaign_id == campaign_id
+    ).delete(synchronize_session=False)
+
+    db.delete(campaign)
+
+    log = ActivityLog(
+        event_type="campaign_deleted",
+        severity="info",
+        message=f"Campaign '{name}' (id={campaign_id}) deleted.",
+        entity_id=campaign_id,
+    )
+    db.add(log)
+    db.commit()
+
+    return {"status": "success", "message": f"Campaign {campaign_id} deleted."}
+
+
 @router.api_route("/{campaign_id}/status", methods=["PATCH", "POST"], response_model=CampaignResponse)
 async def update_campaign_status(campaign_id: int, request: Request, db: Session = Depends(get_db)):
     campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
@@ -91,10 +125,18 @@ async def update_campaign_status(campaign_id: int, request: Request, db: Session
         CampaignEngine.start_campaign(campaign.id)
     elif new_status == "paused":
         campaign.paused_at = datetime.utcnow()
+        try:
+            CampaignEngine.pause_campaign(campaign.id)
+        except Exception:
+            pass
     elif new_status == "completed":
         campaign.completed_at = datetime.utcnow()
     elif new_status == "stopped":
         campaign.stopped_at = datetime.utcnow()
+        try:
+            CampaignEngine.stop_campaign(campaign.id)
+        except Exception:
+            pass
 
     db.commit()
     db.refresh(campaign)
