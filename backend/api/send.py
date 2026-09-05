@@ -131,7 +131,7 @@ def send_email_message(
     Send one email through the configured account provider.
 
     Supported providers:
-        - microsoft / outlook
+        - microsoft / outlook  (SMTP + XOAUTH2 — preserves From Name)
         - google / gmail
         - zeptomail
         - bell
@@ -206,19 +206,33 @@ def send_email_message(
     )
 
     # ---------------------------------------------------------
-    # From Name
+    # From Name priority
     #
-    # ComposeWindow -> payload["from_name"]
-    #                 -> this route
-    #                 -> transport
+    # 1. Compose-time from_name (payload)
+    # 2. Account from_name
+    # 3. Account name
+    # 4. Empty (transport falls back to bare email)
     #
-    # User-selected name takes priority over account default.
+    # Whitespace is normalized; empty string falls through.
     # ---------------------------------------------------------
 
+    requested_from_name = from_name  # already stripped above
+
     effective_from_name = (
-        from_name
-        or str(account.from_name or "").strip()
+        requested_from_name
+        or str(getattr(account, "from_name", None) or "").strip()
+        or str(getattr(account, "name", None) or "").strip()
         or ""
+    )
+
+    logger.info(
+        "SEND DEBUG account_id=%s sender_email=%s "
+        "requested_from_name=%r resolved_from_name=%r provider=%s",
+        account.id,
+        account.email,
+        requested_from_name,
+        effective_from_name,
+        provider_type,
     )
 
     # ---------------------------------------------------------
@@ -243,7 +257,11 @@ def send_email_message(
 
     try:
         # =====================================================
-        # MICROSOFT / OUTLOOK
+        # MICROSOFT / OUTLOOK  →  SMTP + XOAUTH2
+        #
+        # Graph /me/sendMail forces the mailbox Azure AD display
+        # name. SMTP lets us set the real MIME From header, so the
+        # Compose From Name reaches the recipient.
         # =====================================================
 
         if provider_type in {"microsoft", "outlook"}:
@@ -257,13 +275,19 @@ def send_email_message(
                     ),
                 )
 
-            from backend.transports.microsoft import (
-                MicrosoftGraphTransport,
+            from backend.transports.microsoft_smtp import (
+                MicrosoftSmtpTransport,
             )
 
             access_token = decrypt_credential(
                 cred.oauth_access_token_enc
             )
+
+            refresh_token = ""
+            if cred.oauth_refresh_token_enc:
+                refresh_token = decrypt_credential(
+                    cred.oauth_refresh_token_enc
+                )
 
             if not access_token:
                 raise HTTPException(
@@ -274,10 +298,33 @@ def send_email_message(
                     ),
                 )
 
-            transport = MicrosoftGraphTransport(
+            # Optional per-account SMTP host override; default is
+            # smtp.office365.com which works for M365 and most
+            # Outlook.com mailboxes.
+            smtp_host = (
+                getattr(account, "smtp_host", None)
+                or "smtp.office365.com"
+            )
+            smtp_port = (
+                getattr(account, "smtp_port", None)
+                or 587
+            )
+
+            transport = MicrosoftSmtpTransport(
                 access_token=access_token,
                 from_email=account.email,
                 from_name=effective_from_name,
+                refresh_token=refresh_token,
+                smtp_host=smtp_host,
+                smtp_port=smtp_port,
+            )
+
+            logger.info(
+                "SEND DEBUG transport=microsoft_smtp "
+                "from_email=%s from_name=%r to=%s",
+                account.email,
+                effective_from_name,
+                recipient,
             )
 
             result = transport.send_email(
@@ -555,7 +602,8 @@ def send_email_message(
             severity="info",
             message=(
                 f"Email sent successfully to {recipient} "
-                f"via account {account.name}"
+                f"via account {account.name} "
+                f"(from_name={effective_from_name!r})"
             ),
             entity_id=account.id,
         )
@@ -569,6 +617,12 @@ def send_email_message(
         response = {
             "status": "success",
             "message": message_val,
+            "resolved_from_name": effective_from_name,
+            "transport": (
+                "microsoft_smtp"
+                if provider_type in {"microsoft", "outlook"}
+                else provider_type
+            ),
         }
 
         # Only expose tracking_id when tracking is actually enabled.
