@@ -342,6 +342,11 @@ export async function fetchCampaigns() {
     sentCount: c.sent_count || c.sentCount || 0,
     failedCount: c.failed_count || c.failedCount || 0,
     delaySeconds: c.delay_seconds || c.delaySeconds || 30,
+    jitterSeconds: c.jitter_seconds ?? c.jitterSeconds ?? 2,
+    maxRetries: c.max_retries ?? c.maxRetries ?? 3,
+    rotationMode: c.rotation_mode || c.rotationMode || 'round_robin',
+    replyTo: c.reply_to || c.replyTo || '',
+    deliveryRoute: c.delivery_route || c.deliveryRoute || 'auto',
     startedAt: c.started_at || c.startedAt || null,
     completedAt: c.completed_at || c.completedAt || null,
     createdAt: c.created_at || c.createdAt || new Date().toISOString()
@@ -355,7 +360,13 @@ export async function createCampaign(data: any) {
     template_id: data.templateId || data.template_id,
     template_ids: data.templateIds || data.template_ids || [],
     account_id: data.accountId || data.account_id,
-    lead_ids: data.leadIds || data.lead_ids || []
+    lead_ids: data.leadIds || data.lead_ids || [],
+    delay_seconds: data.delaySeconds ?? data.delay_seconds ?? 30,
+    jitter_seconds: data.useJitter === false ? 0 : (data.jitterSeconds ?? data.jitter_seconds ?? 2),
+    max_retries: data.maxRetries ?? data.max_retries ?? 3,
+    rotation_mode: data.rotationMode || data.rotation_mode || 'round_robin',
+    reply_to: data.replyTo || data.reply_to || null,
+    delivery_route: data.deliveryRoute || data.delivery_route || 'auto',
   };
   const res = await fetch(`${API_BASE}/campaigns`, {
     method: 'POST',
