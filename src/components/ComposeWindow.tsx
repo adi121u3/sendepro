@@ -152,9 +152,9 @@ export const ComposeWindow: React.FC<ComposeWindowProps> = ({
       onUpdateSession(session.windowId, { sendError: 'Please specify a recipient email.' });
       return;
     }
+    // Instant send: do NOT wait for draft save. Fire the transport call immediately.
     onUpdateSession(session.windowId, { sending: true, sendError: '', sendSuccess: false });
     try {
-      await handleSaveDraft();
       await api.sendEmailMessage({
         sender_account_id: session.senderAccountId || (accounts[0] ? accounts[0].id : 1),
         recipient: session.recipient,
@@ -165,11 +165,36 @@ export const ComposeWindow: React.FC<ComposeWindowProps> = ({
       });
       onUpdateSession(session.windowId, {
         sending: false,
-        sendSuccess: true
+        sendSuccess: true,
+        isDirty: false,
       });
+      // Background draft save (non-blocking) — never delays the send path
+      void (async () => {
+        try {
+          const payload = {
+            from_name: session.fromName,
+            subject: session.subject,
+            recipient: session.recipient,
+            body: session.body,
+            attachments: JSON.stringify(session.attachments),
+            sender_account_id: session.senderAccountId ? Number(session.senderAccountId) : null,
+          };
+          if (session.draftId) {
+            const saved = await api.updateDraft(session.draftId, payload);
+            onDraftSaved(saved);
+          } else {
+            const saved = await api.createDraft(payload);
+            onDraftSaved(saved);
+            onUpdateSession(session.windowId, { draftId: saved.id });
+          }
+        } catch {
+          /* draft persistence is best-effort after successful send */
+        }
+      })();
+      // Close quickly after success
       setTimeout(() => {
         onClose(session.windowId);
-      }, 1500);
+      }, 600);
     } catch (e: any) {
       onUpdateSession(session.windowId, {
         sending: false,
@@ -308,7 +333,7 @@ export const ComposeWindow: React.FC<ComposeWindowProps> = ({
             >
               {accounts.map(acc => (
                 <option key={acc.id} value={acc.id}>
-                  {acc.name} &lt;{acc.fromEmail || acc.username}&gt;
+                  {acc.name} <{acc.fromEmail || acc.username}>
                 </option>
               ))}
             </select>
@@ -387,12 +412,12 @@ export const ComposeWindow: React.FC<ComposeWindowProps> = ({
           <button type="button" onClick={() => applyFormatting('i')} className="p-1.5 hover:bg-slate-800 rounded text-xs italic" title="Italic"><Italic className="w-3.5 h-3.5" /></button>
           <button type="button" onClick={() => applyFormatting('u')} className="p-1.5 hover:bg-slate-800 rounded text-xs underline" title="Underline"><Underline className="w-3.5 h-3.5" /></button>
           <span className="w-px h-4 bg-slate-800 mx-1"></span>
-          <button type="button" onClick={() => setBody(prev => prev + '<small>')} className="px-2 py-1 hover:bg-slate-800 rounded text-xs">A–</button>
-          <button type="button" onClick={() => setBody(prev => prev + '<strong>')} className="px-2 py-1 hover:bg-slate-800 rounded text-xs font-bold">A+</button>
-          <button type="button" onClick={() => setBody(prev => prev + '<span style="color:teal">')} className="px-2 py-1 hover:bg-slate-800 rounded text-xs text-teal-400 font-semibold">A</button>
+          <button type="button" onClick={() => handleFieldChange('body', session.body + '<small>')} className="px-2 py-1 hover:bg-slate-800 rounded text-xs">A–</button>
+          <button type="button" onClick={() => handleFieldChange('body', session.body + '<strong>')} className="px-2 py-1 hover:bg-slate-800 rounded text-xs font-bold">A+</button>
+          <button type="button" onClick={() => handleFieldChange('body', session.body + '<span style="color:teal">')} className="px-2 py-1 hover:bg-slate-800 rounded text-xs text-teal-400 font-semibold">A</button>
           <span className="w-px h-4 bg-slate-800 mx-1"></span>
-          <button type="button" onClick={() => setBody(prev => prev + '• ')} className="px-2 py-1 hover:bg-slate-800 rounded text-xs">•</button>
-          <button type="button" onClick={() => setBody(prev => prev + '1. ')} className="px-2 py-1 hover:bg-slate-800 rounded text-xs">1.</button>
+          <button type="button" onClick={() => handleFieldChange('body', session.body + '• ')} className="px-2 py-1 hover:bg-slate-800 rounded text-xs">•</button>
+          <button type="button" onClick={() => handleFieldChange('body', session.body + '1. ')} className="px-2 py-1 hover:bg-slate-800 rounded text-xs">1.</button>
           <span className="w-px h-4 bg-slate-800 mx-1"></span>
           <button type="button" onClick={() => applyFormatting('a')} className="p-1.5 hover:bg-slate-800 rounded text-xs" title="Insert Link"><Link2 className="w-3.5 h-3.5" /></button>
           <div className="ml-auto flex items-center gap-2">
