@@ -34,7 +34,7 @@ export const DraftsView: React.FC<DraftsViewProps> = ({ accounts }) => {
     loadDrafts();
   }, [loadDrafts]);
 
-  const openNewCompose = (draft?: Draft | null) => {
+  const openNewCompose = async (draft?: Draft | null) => {
     const windowId = Math.random().toString(36).substring(2, 9);
     const count = activeSessions.length;
     const offset = count * 35;
@@ -49,16 +49,41 @@ export const DraftsView: React.FC<DraftsViewProps> = ({ accounts }) => {
       }
     }
 
+    // Load Email Signature from settings for every NEW message
+    let signature = '';
+    let defaultSenderName = accounts[0]?.name || 'Professional Sender';
+    if (!draft) {
+      try {
+        const settings = await api.fetchSettings();
+        const map: Record<string, string> = {};
+        if (Array.isArray(settings)) {
+          settings.forEach((item: any) => {
+            if (item?.key) map[item.key] = item.value ?? '';
+          });
+        }
+        signature = (map.email_signature || '').trim();
+        if (map.sender_name?.trim()) defaultSenderName = map.sender_name.trim();
+      } catch {
+        /* settings optional */
+      }
+    }
+
+    let body = draft?.body || '';
+    if (!draft && signature) {
+      // Always include signature on new compose (plain text area)
+      body = `\n\n--\n${signature}`;
+    }
+
     const newSession: ComposeSession = {
       windowId,
       draftId: draft?.id,
-      fromName: draft?.from_name || accounts[0]?.name || 'Professional Sender',
+      fromName: draft?.from_name || defaultSenderName,
       senderAccountId: draft?.senderAccountId || draft?.sender_account_id || accounts[0]?.id || '',
       recipient: draft?.recipient || '',
       cc: '',
       bcc: '',
       subject: draft?.subject || '',
-      body: draft?.body || '',
+      body,
       attachments: attachmentsArr,
       isMaximized: false,
       isMinimized: false,
