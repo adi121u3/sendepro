@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, ForeignKey, Index, Table
+from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, ForeignKey, Index, Table, Float
 from sqlalchemy.orm import relationship
 from backend.database import Base
 
@@ -97,6 +97,14 @@ class Campaign(Base):
     
     template_id = Column(Integer, ForeignKey("templates.id"), nullable=True)
     account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)
+
+    # Desktop-parity pacing / delivery settings
+    delay_seconds = Column(Integer, default=30)
+    jitter_seconds = Column(Integer, default=2)
+    max_retries = Column(Integer, default=3)
+    rotation_mode = Column(String(50), default="round_robin")  # round_robin | random | failover
+    reply_to = Column(String(255), nullable=True)
+    delivery_route = Column(String(50), default="auto")  # auto | smtp | zeptomail_smtp | zeptomail_api
 
     total_recipients = Column(Integer, default=0)
     sent_count = Column(Integer, default=0)
