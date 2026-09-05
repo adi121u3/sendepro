@@ -1,0 +1,6 @@
+{
+  "name": "Email Sender Pro",
+  "description": "Professional email marketing and campaign automation web application for managing sender accounts, leads, templates, campaigns, and delivery logs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,164 @@
+from datetime import datetime
+from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, ForeignKey, Index
+from sqlalchemy.orm import relationship
+from backend.database import Base
+
+class Account(Base):
+    __tablename__ = "accounts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    provider = Column(String(50), nullable=False) # 'smtp', 'microsoft', 'zeptomail'
+    name = Column(String(100), nullable=False)
+    email = Column(String(255), nullable=False, index=True)
+    from_name = Column(String(100), nullable=True)
+    enabled = Column(Boolean, default=True)
+    daily_limit = Column(Integer, default=500)
+    status = Column(String(50), default="idle") # idle, active, error, disconnected
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    credential = relationship("AccountCredential", back_populates="account", uselist=False, cascade="all, delete-orphan")
+    campaigns = relationship("Campaign", back_populates="sender_account")
+    delivery_logs = relationship("DeliveryLog", back_populates="account")
+
+class AccountCredential(Base):
+    __tablename__ = "account_credentials"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), unique=True, nullable=False)
+    
+    # Encrypted sensitive fields
+    smtp_password_enc = Column(Text, nullable=True)
+    zeptomail_api_key_enc = Column(Text, nullable=True)
+    oauth_access_token_enc = Column(Text, nullable=True)
+    oauth_refresh_token_enc = Column(Text, nullable=True)
+    oauth_token_expires_at = Column(DateTime, nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    account = relationship("Account", back_populates="credential")
+
+class Lead(Base):
+    __tablename__ = "leads"
+
+    id = Column(Integer, primary_key=True, index=True)
+    first_name = Column(String(100), nullable=True)
+    last_name = Column(String(100), nullable=True)
+    email = Column(String(255), nullable=False, index=True, unique=True)
+    company = Column(String(150), nullable=True)
+    domain = Column(String(150), nullable=True)
+    position = Column(String(150), nullable=True)
+    location = Column(String(150), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    recipients = relationship("CampaignRecipient", back_populates="lead", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("idx_lead_email", "email"),
+        Index("idx_lead_company", "company"),
+    )
+
+class Template(Base):
+    __tablename__ = "templates"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(150), nullable=False, unique=True)
+    subject = Column(String(255), nullable=False)
+    body_html = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    campaigns = relationship("Campaign", back_populates="template")
+
+EmailTemplate = Template
+
+class Campaign(Base):
+    __tablename__ = "campaigns"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(150), nullable=False)
+    status = Column(String(50), default="draft") # draft, running, paused, completed, stopped, error
+    
+    template_id = Column(Integer, ForeignKey("templates.id"), nullable=True)
+    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)
+
+    total_recipients = Column(Integer, default=0)
+    sent_count = Column(Integer, default=0)
+    failed_count = Column(Integer, default=0)
+
+    started_at = Column(DateTime, nullable=True)
+    paused_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    stopped_at = Column(DateTime, nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    template = relationship("Template", back_populates="campaigns")
+    sender_account = relationship("Account", back_populates="campaigns")
+    recipients = relationship("CampaignRecipient", back_populates="campaign", cascade="all, delete-orphan")
+    delivery_logs = relationship("DeliveryLog", back_populates="campaign", cascade="all, delete-orphan")
+
+class CampaignRecipient(Base):
+    __tablename__ = "campaign_recipients"
+
+    id = Column(Integer, primary_key=True, index=True)
+    campaign_id = Column(Integer, ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=False)
+    lead_id = Column(Integer, ForeignKey("leads.id", ondelete="CASCADE"), nullable=False)
+    
+    status = Column(String(50), default="queued") # queued, sending, sent, failed, skipped
+    attempts = Column(Integer, default=0)
+    last_error = Column(Text, nullable=True)
+    
+    queued_at = Column(DateTime, default=datetime.utcnow)
+    sent_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    campaign = relationship("Campaign", back_populates="recipients")
+    lead = relationship("Lead", back_populates="recipients")
+
+    __table_args__ = (
+        Index("idx_queue_status", "campaign_id", "status"),
+    )
+
+class DeliveryLog(Base):
+    __tablename__ = "delivery_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    campaign_id = Column(Integer, ForeignKey("campaigns.id", ondelete="SET NULL"), nullable=True)
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True)
+    
+    recipient = Column(String(255), nullable=False)
+    provider = Column(String(50), nullable=False)
+    status = Column(String(50), nullable=False) # success, failed
+    message_id = Column(String(255), nullable=True)
+    error_info = Column(Text, nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    campaign = relationship("Campaign", back_populates="delivery_logs")
+    account = relationship("Account", back_populates="delivery_logs")
+
+class ActivityLog(Base):
+    __tablename__ = "activity_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_type = Column(String(100), nullable=False) # account_created, campaign_started, email_sent, etc.
+    severity = Column(String(20), default="info") # info, warning, error
+    message = Column(Text, nullable=False)
+    entity_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class Setting(Base):
+    __tablename__ = "settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    key = Column(String(100), unique=True, nullable=False, index=True)
+    value = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

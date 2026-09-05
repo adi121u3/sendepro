@@ -1,0 +1,5 @@
+ZEPTOMAIL_ENDPOINT = "https://api.zeptomail.com/v1.1/email"
+
+BELL_SYMPATICO_HOST = "smtp.sympatico.ca"
+BELL_SYMPATICO_PORT_SSL = 465
+BELL_SYMPATICO_PORT_TLS = 587
