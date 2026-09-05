@@ -334,11 +334,14 @@ export async function fetchCampaigns() {
     id: c.id,
     name: c.name || '',
     status: c.status || 'draft',
+    tag: c.tag || 'Marketing',
     templateId: c.template_id || c.templateId || 0,
+    templateIds: c.template_ids || c.templateIds || (c.template_id ? [c.template_id] : []),
     accountId: c.account_id || c.accountId || null,
     totalLeads: c.total_recipients || c.totalLeads || 0,
     sentCount: c.sent_count || c.sentCount || 0,
     failedCount: c.failed_count || c.failedCount || 0,
+    delaySeconds: c.delay_seconds || c.delaySeconds || 30,
     startedAt: c.started_at || c.startedAt || null,
     completedAt: c.completed_at || c.completedAt || null,
     createdAt: c.created_at || c.createdAt || new Date().toISOString()
@@ -348,7 +351,9 @@ export async function fetchCampaigns() {
 export async function createCampaign(data: any) {
   const payload = {
     name: data.name,
+    tag: data.tag || 'Marketing',
     template_id: data.templateId || data.template_id,
+    template_ids: data.templateIds || data.template_ids || [],
     account_id: data.accountId || data.account_id,
     lead_ids: data.leadIds || data.lead_ids || []
   };
@@ -375,6 +380,18 @@ export async function updateCampaignStatus(id: number | string, status: string) 
     throw new Error(err.detail || 'Failed to update campaign status');
   }
   return res.json();
+}
+
+export async function deleteCampaign(id: number | string) {
+  const res = await fetch(`${API_BASE}/campaigns/${id}`, {
+    method: 'DELETE',
+    headers: getAuthHeaders(false),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to delete campaign');
+  }
+  return res.json().catch(() => ({ status: 'success' }));
 }
 
 export async function fetchActivityLogs() {
