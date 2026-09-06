@@ -16,6 +16,22 @@ from typing import Optional
 from backend.utils.deliverability import html_to_text
 
 
+def sanitize_display_name(name: str) -> str:
+    """
+    Clean display names for the From header.
+
+    Tabs / control characters (e.g. 'David\\tJackson') look abnormal to
+    filters and can push messages toward spam.
+    """
+    if not name:
+        return ""
+    # Drop control chars except ordinary space
+    cleaned = re.sub(r"[\x00-\x1f\x7f]", " ", str(name))
+    # Collapse whitespace
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
 def _escape_text(value: str) -> str:
     return (
         (value or "")
@@ -26,10 +42,6 @@ def _escape_text(value: str) -> str:
 
 
 def _wrap_simple_html(html: str, plain_fallback: str) -> str:
-    """
-    Build simple, client-like HTML similar to Aerion.
-    Avoid fragile mid-tag line wrapping issues.
-    """
     body = (html or "").strip()
     if not body:
         safe = _escape_text(plain_fallback).replace("\r\n", "\n").replace("\n", "<br>")
@@ -76,7 +88,7 @@ def build_outbound_message(
     """Build a clean outbound MIME message (no tracking pixels)."""
     msg = MIMEMultipart("alternative")
 
-    name = (from_name or "").strip()
+    name = sanitize_display_name(from_name or "")
     addr = (from_email or "").strip()
     if name and addr:
         msg["From"] = formataddr((name, addr))
@@ -107,8 +119,6 @@ def build_outbound_message(
     plain = (text_body or "").strip() or html_to_text(html_raw) or (subject or "").strip() or " "
     html = _wrap_simple_html(html_raw, plain)
 
-    # Let email.mime choose a valid encoding (7bit / qp / base64).
-    # Do NOT manually force CTE headers — that was corrupting HTML tags.
     msg.attach(MIMEText(plain, "plain", "utf-8"))
     msg.attach(MIMEText(html, "html", "utf-8"))
 
@@ -116,5 +126,4 @@ def build_outbound_message(
 
 
 def message_as_bytes(msg: MIMEMultipart) -> bytes:
-    """Serialize for SMTP DATA."""
     return msg.as_bytes()
