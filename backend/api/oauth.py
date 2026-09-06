@@ -1,4 +1,7 @@
 import os
+import base64
+import json
+import logging
 import requests
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -8,6 +11,8 @@ from urllib.parse import urlencode
 from backend.database import get_db
 from backend.models import Account, AccountCredential, ActivityLog
 from backend.security.encryption import encrypt_credential, decrypt_credential
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/oauth", tags=["oauth"])
 
@@ -39,29 +44,90 @@ def _microsoft_authority() -> str:
     return f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0"
 
 
-# Microsoft scopes required for SMTP + XOAUTH2 delivery and basic profile.
-# SMTP.Send is what allows the real MIME From header (including display name)
-# to reach recipients. Mail.Send is kept for any Graph-based features.
+# IMPORTANT:
+# Microsoft does NOT allow mixing different resource scopes in one token.
+# outlook.office.com + graph.microsoft.com together => AADSTS70011 invalid_scope.
+#
+# For Aerion-style SMTP + XOAUTH2 we only need:
+#   https://outlook.office.com/SMTP.Send
+# plus OIDC scopes for identity (openid / email / profile / offline_access).
 MICROSOFT_SCOPES = (
-    "https://outlook.office.com/SMTP.Send "
-    "https://graph.microsoft.com/Mail.Send "
-    "https://graph.microsoft.com/User.Read "
-    "offline_access"
+    "openid offline_access email profile "
+    "https://outlook.office.com/SMTP.Send"
 )
+
+
+def _decode_jwt_payload(token: str) -> dict:
+    """Decode JWT payload without signature verification (identity claims only)."""
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return {}
+        payload = parts[1]
+        padding = "=" * (-len(payload) % 4)
+        raw = base64.urlsafe_b64decode(payload + padding)
+        data = json.loads(raw.decode("utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        logger.warning("Failed to decode id_token: %s", exc)
+        return {}
+
+
+def _microsoft_identity(token_data: dict, access_token: str) -> tuple[str, str]:
+    """
+    Resolve email + display name for a Microsoft SMTP token.
+
+    Prefer OIDC id_token claims (works with outlook.office.com resource).
+    Graph /me will NOT accept an outlook.office.com access token.
+    """
+    email = ""
+    name = ""
+
+    id_token = token_data.get("id_token") or ""
+    if id_token:
+        claims = _decode_jwt_payload(id_token)
+        email = (
+            claims.get("email")
+            or claims.get("preferred_username")
+            or claims.get("upn")
+            or ""
+        )
+        name = claims.get("name") or claims.get("given_name") or ""
+
+    # Fallback: some tenants put username in the access token audience flow only
+    if not email and access_token:
+        claims = _decode_jwt_payload(access_token)
+        email = (
+            claims.get("email")
+            or claims.get("unique_name")
+            or claims.get("upn")
+            or claims.get("preferred_username")
+            or ""
+        )
+        if not name:
+            name = claims.get("name") or ""
+
+    email = str(email or "").strip()
+    name = str(name or "").strip() or email
+    return email, name
 
 
 @router.get("/authorize")
 def oauth_authorize(provider: str = Query(..., description="google or microsoft")):
     """Initiates browser-based OAuth2 authorization flow for Gmail or Microsoft 365."""
     provider = provider.lower()
-    
+
     if provider == "google":
         redirect_uri = _redirect_uri("google")
         auth_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode({
             "client_id": _required_client_id("google"),
             "redirect_uri": redirect_uri,
             "response_type": "code",
-            "scope": "https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile",
+            "scope": (
+                "https://www.googleapis.com/auth/gmail.send "
+                "https://www.googleapis.com/auth/userinfo.email "
+                "https://www.googleapis.com/auth/userinfo.profile"
+            ),
             "access_type": "offline",
             "prompt": "consent",
             "state": "google",
@@ -73,6 +139,7 @@ def oauth_authorize(provider: str = Query(..., description="google or microsoft"
             "client_id": _required_client_id("microsoft"),
             "redirect_uri": redirect_uri,
             "response_type": "code",
+            "response_mode": "query",
             "scope": MICROSOFT_SCOPES,
             "prompt": "consent",
             "state": "microsoft",
@@ -82,20 +149,22 @@ def oauth_authorize(provider: str = Query(..., description="google or microsoft"
 
     return RedirectResponse(url=auth_url)
 
+
 @router.get("/callback")
 def oauth_callback(
     code: str = Query(...),
     state: str = Query(None),
     provider: str = Query(None, description="google or microsoft"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-    """Handles OAuth callback, exchanges authorization code for tokens, fetches user profile, and persists account."""
+    """Handles OAuth callback, exchanges code for tokens, stores account + credentials."""
     try:
         provider = (provider or state or "").lower()
         if provider == "outlook":
             provider = "microsoft"
         if provider not in {"google", "microsoft"}:
             raise HTTPException(status_code=400, detail="OAuth provider is missing or unsupported.")
+
         client_secret_name = "GOOGLE_CLIENT_SECRET" if provider == "google" else "MICROSOFT_CLIENT_SECRET"
         client_secret = os.getenv(client_secret_name, "").strip()
         if not client_secret:
@@ -118,15 +187,10 @@ def oauth_callback(
             "redirect_uri": redirect_uri,
             "grant_type": "authorization_code",
         }
-        # Explicitly request SMTP scope on token exchange for Microsoft
         if provider == "microsoft":
             token_data_payload["scope"] = MICROSOFT_SCOPES
 
-        token_response = requests.post(
-            token_url,
-            data=token_data_payload,
-            timeout=20,
-        )
+        token_response = requests.post(token_url, data=token_data_payload, timeout=20)
         if not token_response.ok:
             try:
                 provider_error = token_response.json()
@@ -139,31 +203,40 @@ def oauth_callback(
                 status_code=400,
                 detail=f"{provider.capitalize()} token exchange failed: {detail}",
             )
+
         token_data = token_response.json()
         access_token = token_data.get("access_token")
         refresh_token = token_data.get("refresh_token", "")
         if not access_token:
             raise HTTPException(status_code=400, detail="OAuth provider did not return an access token.")
 
-        profile_url = (
-            "https://www.googleapis.com/oauth2/v2/userinfo"
-            if provider == "google"
-            else "https://graph.microsoft.com/v1.0/me"
-        )
-        profile_response = requests.get(
-            profile_url,
-            headers={"Authorization": f"Bearer {access_token}"},
-            timeout=20,
-        )
-        profile_response.raise_for_status()
-        profile = profile_response.json()
-        email = profile.get("email") or profile.get("mail") or profile.get("userPrincipalName")
-        name = profile.get("name") or profile.get("displayName") or email
+        if provider == "google":
+            profile_response = requests.get(
+                "https://www.googleapis.com/oauth2/v2/userinfo",
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=20,
+            )
+            profile_response.raise_for_status()
+            profile = profile_response.json()
+            email = profile.get("email") or ""
+            name = profile.get("name") or email
+        else:
+            email, name = _microsoft_identity(token_data, access_token)
+
+        email = str(email or "").strip()
+        name = str(name or "").strip() or email
         if not email:
-            raise HTTPException(status_code=400, detail="OAuth provider did not return an email address.")
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Microsoft did not return an email address in the token. "
+                    "Ensure the app registration allows personal Microsoft accounts "
+                    "and that email/profile scopes are granted."
+                ),
+            )
+
         expires_in = int(token_data.get("expires_in", 3600))
 
-        # Upsert account in DB
         existing = db.query(Account).filter(Account.email == email, Account.provider == provider).first()
         if existing:
             account = existing
@@ -176,15 +249,16 @@ def oauth_callback(
             cred = db.query(AccountCredential).filter(AccountCredential.account_id == account.id).first()
             if cred:
                 cred.oauth_access_token_enc = encrypt_credential(access_token)
-                cred.oauth_refresh_token_enc = encrypt_credential(refresh_token)
+                if refresh_token:
+                    cred.oauth_refresh_token_enc = encrypt_credential(refresh_token)
                 cred.oauth_token_expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
                 cred.updated_at = datetime.utcnow()
             else:
                 cred = AccountCredential(
                     account_id=account.id,
                     oauth_access_token_enc=encrypt_credential(access_token),
-                    oauth_refresh_token_enc=encrypt_credential(refresh_token),
-                    oauth_token_expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+                    oauth_refresh_token_enc=encrypt_credential(refresh_token or ""),
+                    oauth_token_expires_at=datetime.utcnow() + timedelta(seconds=expires_in),
                 )
                 db.add(cred)
             db.commit()
@@ -196,7 +270,7 @@ def oauth_callback(
                 from_name=name,
                 enabled=True,
                 daily_limit=500,
-                status="active"
+                status="active",
             )
             db.add(account)
             db.commit()
@@ -205,8 +279,8 @@ def oauth_callback(
             cred = AccountCredential(
                 account_id=account.id,
                 oauth_access_token_enc=encrypt_credential(access_token),
-                oauth_refresh_token_enc=encrypt_credential(refresh_token),
-                oauth_token_expires_at = datetime.utcnow() + timedelta(hours=1)
+                oauth_refresh_token_enc=encrypt_credential(refresh_token or ""),
+                oauth_token_expires_at=datetime.utcnow() + timedelta(seconds=expires_in),
             )
             db.add(cred)
             db.commit()
@@ -214,12 +288,8 @@ def oauth_callback(
         log = ActivityLog(
             event_type="oauth_connected",
             severity="info",
-            message=f"OAuth2 browser flow completed for {email} via {provider}.",
+            message=f"OAuth2 browser flow completed for {email} via {provider} (SMTP.Send).",
             entity_id=account.id,
-            account_name=name,
-            lead_email=email,
-            status="SUCCESS",
-            provider_type=provider
         )
         db.add(log)
         db.commit()
@@ -239,7 +309,7 @@ def oauth_callback(
             <body>
                 <div class="card">
                     <h2>✓ OAuth Authorization Successful</h2>
-                    <p>Successfully authenticated <b>{email}</b> with {provider.capitalize()}. You can now close this window or return to the application.</p>
+                    <p>Successfully authenticated <b>{email}</b> with Microsoft SMTP. You can close this window.</p>
                     <a href="/" class="btn" onclick="window.close();">Return to App</a>
                 </div>
                 <script>
@@ -255,5 +325,7 @@ def oauth_callback(
         """
         return HTMLResponse(content=html_content)
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"OAuth callback error: {str(e)}")
