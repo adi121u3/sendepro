@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_SMTP_HOST = "smtp.office365.com"
 DEFAULT_SMTP_PORT = 587
 
+# Must match backend/api/oauth.py — do not mix outlook.office.com with graph.microsoft.com
+MICROSOFT_SMTP_SCOPES = "openid offline_access https://outlook.office.com/SMTP.Send"
+
 
 def _build_xoauth2_string(email: str, access_token: str) -> str:
     auth_string = f"user={email}\x01auth=Bearer {access_token}\x01\x01"
@@ -56,12 +59,7 @@ def _refresh_microsoft_token(refresh_token: str) -> Optional[str]:
                 "client_secret": client_secret,
                 "refresh_token": refresh_token,
                 "grant_type": "refresh_token",
-                "scope": (
-                    "https://outlook.office.com/SMTP.Send "
-                    "https://graph.microsoft.com/Mail.Send "
-                    "https://graph.microsoft.com/User.Read "
-                    "offline_access"
-                ),
+                "scope": MICROSOFT_SMTP_SCOPES,
             },
             timeout=20,
         )
@@ -141,8 +139,6 @@ class MicrosoftSmtpTransport:
         tracking_id: Optional[str] = None,
         tracking_domain: str = "",
     ) -> DeliveryResult:
-        # tracking_* ignored — pixels removed for deliverability
-
         if not self.access_token:
             return DeliveryResult(
                 status="FAILED",
