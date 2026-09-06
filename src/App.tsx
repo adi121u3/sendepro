@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { TabType, Campaign, Account, Lead, EmailTemplate, ActivityLog } from './types';
 import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
@@ -25,6 +25,7 @@ export default function App() {
   const [templates, setTemplates] = useState<EmailTemplate[]>([]);
   const [logs, setLogs] = useState<ActivityLog[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadData = async () => {
     try {
@@ -47,6 +48,20 @@ export default function App() {
     }
   };
 
+  /** Lightweight poll used while campaigns are running */
+  const refreshCampaignProgress = async () => {
+    try {
+      const [cmps, actLogs] = await Promise.all([
+        api.fetchCampaigns().catch(() => null),
+        api.fetchActivityLogs().catch(() => null),
+      ]);
+      if (Array.isArray(cmps)) setCampaigns(cmps);
+      if (Array.isArray(actLogs)) setLogs(actLogs);
+    } catch {
+      /* ignore transient poll errors */
+    }
+  };
+
   useEffect(() => {
     api.verifyAuth().then(authed => {
       setIsAuthenticated(authed);
@@ -57,6 +72,39 @@ export default function App() {
       }
     });
   }, []);
+
+  // Live progress: poll every 2s while any campaign is running
+  useEffect(() => {
+    if (!isAuthenticated) {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+      return;
+    }
+
+    const hasRunning = campaigns.some(c => c.status === 'running');
+    if (!hasRunning) {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+      return;
+    }
+
+    if (pollRef.current) return; // already polling
+
+    pollRef.current = setInterval(() => {
+      void refreshCampaignProgress();
+    }, 2000);
+
+    return () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, [isAuthenticated, campaigns]);
 
   const handleUpdateCampaignStatus = async (id: string, status: Campaign['status']) => {
     try {
@@ -90,8 +138,6 @@ export default function App() {
         ? parseInt(String(newCmp.templateId).replace(/\D/g, ''), 10)
         : templateIds[0] || null;
 
-      // No-template compose: auto-create a DB template from subject/body
-      // so the campaign worker can send without requiring a pre-picked template.
       if ((!primaryTemplateId || Number.isNaN(primaryTemplateId)) && (newCmp.subject || newCmp.bodyHtml)) {
         try {
           const createdTpl = await api.createTemplate({
