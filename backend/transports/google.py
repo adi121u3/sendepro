@@ -3,11 +3,13 @@ import logging
 import os
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import formataddr, formatdate, make_msgid
 from typing import Optional
 
 import requests
 
 from backend.transports.base import DeliveryResult
+from backend.utils.deliverability import inject_tracking_pixel, html_to_text
 
 logger = logging.getLogger(__name__)
 
@@ -54,24 +56,36 @@ class GmailApiTransport:
         tracking_id: Optional[str] = None,
         tracking_domain: str = "",
     ) -> DeliveryResult:
-        final_html = html_body or ""
-        if tracking_id:
-            pixel_url = f"{tracking_domain}/api/track?id={tracking_id}"
-            tracking_tag = f'<img src="{pixel_url}" alt="" width="1" height="1" style="display:none;"/>'
-            final_html = final_html.replace("</body>", f"{tracking_tag}</body>") if "</body>" in final_html else final_html + tracking_tag
+        # HTTPS-only tracking — never localhost / http / empty domain
+        final_html = inject_tracking_pixel(html_body or "", tracking_id, tracking_domain)
+        plain = (text_body or "").strip() or html_to_text(final_html) or subject or ""
 
         message = MIMEMultipart("alternative")
-        message["From"] = f"{self.from_name} <{self.from_email}>" if self.from_name else self.from_email
+        if self.from_name:
+            message["From"] = formataddr((self.from_name, self.from_email))
+        else:
+            message["From"] = self.from_email
         message["To"] = to_email
-        message["Subject"] = subject
+        message["Subject"] = subject or ""
+        message["Date"] = formatdate(localtime=True)
+        try:
+            domain = self.from_email.split("@")[-1] if "@" in self.from_email else "localhost"
+            message["Message-ID"] = make_msgid(domain=domain)
+        except Exception:
+            pass
+
         if reply_to:
             message["Reply-To"] = reply_to
+
+        # High priority is a mild spam signal for cold mail — only when requested
         if high_priority:
-            message["X-Priority"] = "1 (Highest)"
-            message["Importance"] = "high"
-        if text_body:
-            message.attach(MIMEText(text_body, "plain"))
-        message.attach(MIMEText(final_html, "html"))
+            message["X-Priority"] = "1"
+            message["Importance"] = "High"
+
+        # Always multipart/alternative with text first, then HTML
+        message.attach(MIMEText(plain, "plain", "utf-8"))
+        message.attach(MIMEText(final_html or f"<p>{plain}</p>", "html", "utf-8"))
+
         encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode().rstrip("=")
 
         for attempt in range(2):
@@ -87,11 +101,23 @@ class GmailApiTransport:
             if response.status_code == 401 and attempt == 0 and self._refresh_access_token():
                 continue
             if response.status_code == 401:
-                return DeliveryResult(status="FAILED", message="Google OAuth access expired. Reconnect the Gmail account.", retryable=False)
+                return DeliveryResult(
+                    status="FAILED",
+                    message="Google OAuth access expired. Reconnect the Gmail account.",
+                    retryable=False,
+                )
             if not response.ok:
                 detail = response.text[:500] or response.reason
                 logger.error("Gmail API send failed: %s", detail)
-                return DeliveryResult(status="FAILED", message=f"Gmail API send failed: {detail}", retryable=True)
+                return DeliveryResult(
+                    status="FAILED",
+                    message=f"Gmail API send failed: {detail}",
+                    retryable=True,
+                )
             return DeliveryResult(status="SENT", message="Email sent successfully via Gmail API.")
 
-        return DeliveryResult(status="FAILED", message="Google OAuth access expired. Reconnect the Gmail account.", retryable=False)
+        return DeliveryResult(
+            status="FAILED",
+            message="Google OAuth access expired. Reconnect the Gmail account.",
+            retryable=False,
+        )
