@@ -1,16 +1,19 @@
 """
 ZeptoMail (Zoho) transactional API transport.
 
-Auth header format:
-  Authorization: Zoho-enczapikey <API_KEY>
+Auth:  Authorization: Zoho-enczapikey <API_KEY>
+Send:  POST https://api.zeptomail.com/v1.1/email
 
-Send endpoint:
-  POST https://api.zeptomail.com/v1.1/email
+Reply-To:
+  ZeptoMail accepts reply_to so recipient replies go to a different inbox.
+  Note: Reply-To is a standard email header — clients may still show it
+  if the user inspects headers. It cannot be fully "hidden" while still
+  redirecting replies; that is how email works.
 """
 
 from __future__ import annotations
 
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import requests
 import logging
 
@@ -36,13 +39,14 @@ class ZeptoMailTransport(BaseTransport):
             except Exception as exc:
                 logger.error("Unable to load ZeptoMail credential: %s", exc)
 
-        # Accept keys pasted with or without the Zoho prefix.
         prefix = "zoho-enczapikey "
         if raw_key.lower().startswith(prefix):
             raw_key = raw_key[len(prefix) :].strip()
 
         self.api_key = raw_key
         self.from_name = (account_config.get("from_name") or "").strip()
+        # Optional default reply-to stored on the account config
+        self.default_reply_to = (account_config.get("reply_to") or "").strip()
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -65,7 +69,6 @@ class ZeptoMailTransport(BaseTransport):
         try:
             data = response.json()
             if isinstance(data, dict):
-                # ZeptoMail error shapes vary
                 for key in ("message", "error", "error_message", "errorMessage"):
                     if data.get(key):
                         return str(data[key])
@@ -80,22 +83,35 @@ class ZeptoMailTransport(BaseTransport):
         text = (response.text or "").strip()
         return text[:500] if text else f"HTTP {response.status_code}"
 
-    def test_connection(self) -> DeliveryResult:
+    @staticmethod
+    def _build_reply_to(reply_to: Optional[str]) -> Optional[list]:
         """
-        ZeptoMail does not expose a dedicated ping endpoint.
+        ZeptoMail expects:
+          "reply_to": [ { "address": "replies@domain.com", "name": "Support" } ]
+        """
+        if not reply_to:
+            return None
+        value = reply_to.strip()
+        if not value or "@" not in value:
+            return None
 
-        Strategy:
-          1) Validate key presence/format
-          2) POST a deliberately invalid minimal payload
-             - 401/403 => bad API key
-             - 400 with validation error => key is accepted (connected)
-             - 200 is unexpected but treated as connected
-        """
+        # Support "Name <email@x.com>" or plain email
+        name = ""
+        address = value
+        if "<" in value and ">" in value:
+            name = value.split("<")[0].strip().strip('"')
+            address = value.split("<")[1].split(">")[0].strip()
+
+        entry: Dict[str, str] = {"address": address}
+        if name:
+            entry["name"] = name
+        return [entry]
+
+    def test_connection(self) -> DeliveryResult:
         valid, error = self._validate_config()
         if not valid:
             return self.failure_result(status="FAILED", message=error, retryable=False)
 
-        # Minimal invalid payload: missing required 'to' causes 400 if auth OK.
         probe = {
             "from": {"address": self.from_email, "name": self.from_name or "SendePro"},
             "subject": "connection-test",
@@ -115,33 +131,16 @@ class ZeptoMailTransport(BaseTransport):
                     status="FAILED",
                     message=(
                         "ZeptoMail authentication failed. "
-                        "Check the Send Mail Token and that the sender domain is verified. "
+                        "Check the Send Mail Token and verified domain. "
                         f"Detail: {self._response_text(response)}"
                     ),
                     retryable=False,
                 )
 
-            if response.status_code in (200, 201):
+            if response.status_code in (200, 201, 400, 404, 405, 422):
                 return self.success_result(
                     status="CONNECTED",
-                    message="ZeptoMail API connection successful.",
-                )
-
-            # 400 = request validated enough that auth worked
-            if response.status_code == 400:
-                return self.success_result(
-                    status="CONNECTED",
-                    message=(
-                        "ZeptoMail API key accepted (auth OK). "
-                        "Ready to send from verified domain."
-                    ),
-                )
-
-            # Method quirks / other responses
-            if response.status_code in (404, 405, 422):
-                return self.success_result(
-                    status="CONNECTED",
-                    message=f"ZeptoMail API reachable (HTTP {response.status_code}). Auth headers accepted.",
+                    message="ZeptoMail API key accepted. Ready to send from verified domain.",
                 )
 
             return self.failure_result(
@@ -152,7 +151,7 @@ class ZeptoMailTransport(BaseTransport):
         except requests.Timeout:
             return self.failure_result(
                 status="FAILED",
-                message="ZeptoMail connection timed out. Check outbound HTTPS access to api.zeptomail.com.",
+                message="ZeptoMail connection timed out.",
                 retryable=True,
             )
         except Exception as exc:
@@ -216,12 +215,14 @@ class ZeptoMailTransport(BaseTransport):
         if text_body:
             payload["textbody"] = text_body
 
-        if reply_to:
-            payload["reply_to"] = [{"address": reply_to}]
+        # Prefer per-message reply_to, else account default
+        effective_reply = (reply_to or self.default_reply_to or "").strip()
+        reply_payload = self._build_reply_to(effective_reply)
+        if reply_payload:
+            payload["reply_to"] = reply_payload
 
         headers = self._headers()
         if high_priority:
-            # ZeptoMail does not document X-Priority on API; keep as optional client hint only.
             headers["X-Priority"] = "1"
 
         try:
@@ -233,9 +234,10 @@ class ZeptoMailTransport(BaseTransport):
             )
 
             if response.status_code in (200, 201):
+                extra = f" Reply-To={effective_reply}" if effective_reply else ""
                 return self.success_result(
                     status="SENT",
-                    message="Email sent successfully via ZeptoMail API.",
+                    message=f"Email sent successfully via ZeptoMail API.{extra}",
                 )
 
             if response.status_code in (401, 403):
