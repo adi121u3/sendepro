@@ -32,6 +32,7 @@ def dispatch_email_message(
     credential = getattr(account, "credential", None)
     provider_type = (account.provider or "smtp").strip().lower()
     sender_name = from_name or account.from_name or ""
+    effective_reply = (reply_to or "").strip() or None
 
     # ---------------------------------------------------------
     # Microsoft / Outlook — SMTP + XOAUTH2
@@ -62,7 +63,7 @@ def dispatch_email_message(
             subject=subject,
             html_body=body,
             high_priority=high_priority,
-            reply_to=reply_to or None,
+            reply_to=effective_reply,
         )
         if not _result_ok(result):
             raise RuntimeError(getattr(result, "message", None) or "Microsoft SMTP send failed")
@@ -95,7 +96,7 @@ def dispatch_email_message(
             subject=subject,
             html_body=body,
             high_priority=high_priority,
-            reply_to=reply_to or None,
+            reply_to=effective_reply,
         )
         if not _result_ok(result):
             raise RuntimeError(getattr(result, "message", None) or "Gmail API send failed")
@@ -119,6 +120,7 @@ def dispatch_email_message(
                 "from_email": account.email,
                 "from_name": sender_name,
                 "api_key": api_key,
+                "reply_to": effective_reply or "",
             }
         )
         result = transport.send_email(
@@ -126,6 +128,7 @@ def dispatch_email_message(
             subject=subject,
             html_body=body,
             high_priority=high_priority,
+            reply_to=effective_reply,
         )
         if not _result_ok(result):
             raise RuntimeError(getattr(result, "message", None) or "ZeptoMail send failed")
@@ -149,7 +152,7 @@ def dispatch_email_message(
             {
                 "from_email": account.email,
                 "from_name": sender_name,
-                "host": account.smtp_host,
+                "host": account.smtp_host or "smtphm.sympatico.ca",
                 "port": account.smtp_port or 587,
                 "security": account.smtp_security or "starttls",
                 "username": account.smtp_username or account.email,
@@ -161,6 +164,7 @@ def dispatch_email_message(
             subject=subject,
             html_body=body,
             high_priority=high_priority,
+            reply_to=effective_reply,
         )
         if not _result_ok(result):
             raise RuntimeError(getattr(result, "message", None) or "Bell SMTP send failed")
@@ -182,7 +186,7 @@ def dispatch_email_message(
         to_email=recipient,
         subject=subject,
         html_body=body,
-        reply_to=reply_to or None,
+        reply_to=effective_reply,
         high_priority=high_priority,
     )
     if not _result_ok(result):
