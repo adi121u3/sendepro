@@ -1,15 +1,12 @@
 import base64
 import logging
 import os
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.utils import formataddr, formatdate, make_msgid
 from typing import Optional
 
 import requests
 
 from backend.transports.base import DeliveryResult
-from backend.utils.deliverability import inject_tracking_pixel, html_to_text
+from backend.transports.mime_builder import build_outbound_message, message_as_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -56,37 +53,18 @@ class GmailApiTransport:
         tracking_id: Optional[str] = None,
         tracking_domain: str = "",
     ) -> DeliveryResult:
-        # HTTPS-only tracking — never localhost / http / empty domain
-        final_html = inject_tracking_pixel(html_body or "", tracking_id, tracking_domain)
-        plain = (text_body or "").strip() or html_to_text(final_html) or subject or ""
-
-        message = MIMEMultipart("alternative")
-        if self.from_name:
-            message["From"] = formataddr((self.from_name, self.from_email))
-        else:
-            message["From"] = self.from_email
-        message["To"] = to_email
-        message["Subject"] = subject or ""
-        message["Date"] = formatdate(localtime=True)
-        try:
-            domain = self.from_email.split("@")[-1] if "@" in self.from_email else "localhost"
-            message["Message-ID"] = make_msgid(domain=domain)
-        except Exception:
-            pass
-
-        if reply_to:
-            message["Reply-To"] = reply_to
-
-        # High priority is a mild spam signal for cold mail — only when requested
-        if high_priority:
-            message["X-Priority"] = "1"
-            message["Importance"] = "High"
-
-        # Always multipart/alternative with text first, then HTML
-        message.attach(MIMEText(plain, "plain", "utf-8"))
-        message.attach(MIMEText(final_html or f"<p>{plain}</p>", "html", "utf-8"))
-
-        encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode().rstrip("=")
+        # tracking_id / tracking_domain intentionally ignored — no pixels
+        message = build_outbound_message(
+            from_email=self.from_email,
+            from_name=self.from_name or "",
+            to_email=to_email,
+            subject=subject or "",
+            html_body=html_body or "",
+            text_body=text_body or "",
+            reply_to=reply_to,
+            high_priority=high_priority,
+        )
+        encoded_message = base64.urlsafe_b64encode(message_as_bytes(message)).decode().rstrip("=")
 
         for attempt in range(2):
             response = requests.post(
