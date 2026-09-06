@@ -1,18 +1,18 @@
 """
 Bell / Sympatico SMTP transport.
 
-Official endpoints:
-  Primary : smtphm.sympatico.ca
-  Legacy  : smtp.sympatico.ca
-  Ports   : 587 STARTTLS | 465 SSL
+Official settings (Bell support):
+  Host     : smtphm.sympatico.ca
+  Ports    : 587 (preferred) or 25
+  Security : STARTTLS / TLS
+  Username : full email (name@bell.net or name@sympatico.ca)
+  Password : Bell webmail password
 
-Username = full email address.
-Password = Bell webmail password (or app password).
-
-Connection strategy:
-  1. Try the account's configured host/port/security first.
-  2. On network / TLS failures, walk a fixed fallback list.
-  3. On clear AUTH rejection, stop early (same credentials will fail everywhere).
+Notes:
+  - smtp.sympatico.ca is dead (DNS fails) — do not use.
+  - Port 465 is not an official Bell SMTP port.
+  - Bell often blocks non-residential / non-Canadian / VPN IPs.
+    Connection refused / timeout is usually a network block, not a wrong password.
 """
 
 from __future__ import annotations
@@ -29,30 +29,37 @@ from email.utils import formataddr
 
 from backend.transports.base import BaseTransport, DeliveryResult
 from backend.security.credentials import CredentialManager
+from backend.utils.deliverability import inject_tracking_pixel, html_to_text
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TIMEOUT = 25
+DEFAULT_TIMEOUT = 30
 
 
 @dataclass(frozen=True)
 class BellEndpoint:
     host: str
     port: int
-    security: str  # starttls | ssl
+    security: str  # starttls | ssl | plain
 
     @property
     def label(self) -> str:
         return f"{self.host}:{self.port}/{self.security}"
 
 
-# Ordered fallbacks after the account's preferred endpoint.
+# Official host only. Port 587 first, then 25 (Bell docs).
 BELL_FALLBACKS: List[BellEndpoint] = [
     BellEndpoint("smtphm.sympatico.ca", 587, "starttls"),
-    BellEndpoint("smtphm.sympatico.ca", 465, "ssl"),
-    BellEndpoint("smtp.sympatico.ca", 587, "starttls"),
-    BellEndpoint("smtp.sympatico.ca", 465, "ssl"),
+    BellEndpoint("smtphm.sympatico.ca", 25, "starttls"),
 ]
+
+NETWORK_BLOCK_HINT = (
+    "Your PC cannot reach Bell's SMTP servers. "
+    "This is almost always a network restriction, not a wrong password. "
+    "Bell often allows SMTP only from residential Canadian ISP connections. "
+    "Try: home Bell internet (no VPN), Windows firewall allow Python, "
+    "or send via Outlook/Gmail/ZeptoMail instead."
+)
 
 
 def _normalize_security(value: str | None, port: int) -> str:
@@ -63,6 +70,8 @@ def _normalize_security(value: str | None, port: int) -> str:
         return "ssl"
     if port == 465:
         return "ssl"
+    if port == 25:
+        return "starttls"
     return "starttls"
 
 
@@ -81,6 +90,10 @@ class BellSympaticoTransport(BaseTransport):
                 logger.error("Unable to load Bell credential: %s", exc)
 
         host = (account_config.get("host") or "").strip() or "smtphm.sympatico.ca"
+        # Ignore dead legacy hostname
+        if host.lower() in {"smtp.sympatico.ca", "smtp.bell.net"}:
+            host = "smtphm.sympatico.ca"
+
         port = int(account_config.get("port") or 587)
         security = _normalize_security(account_config.get("security"), port)
 
@@ -88,7 +101,6 @@ class BellSympaticoTransport(BaseTransport):
         self.username = (account_config.get("username") or self.from_email or "").strip()
         self.from_name = (account_config.get("from_name") or "").strip()
 
-        # Back-compat attributes used by older callers / logs
         self.host = self.preferred.host
         self.port = self.preferred.port
         self.security = self.preferred.security
@@ -97,7 +109,7 @@ class BellSympaticoTransport(BaseTransport):
         if not self.username:
             return False, "Bell email/username is missing. Use the full email address."
         if "@" not in self.username:
-            return False, "Bell username must be the full email (e.g. name@bell.net)."
+            return False, "Bell username must be the full email (e.g. name@bell.net or name@sympatico.ca)."
         if not self.password:
             return False, "Bell password is missing. Re-save the account password and try again."
         return True, ""
@@ -106,6 +118,9 @@ class BellSympaticoTransport(BaseTransport):
         seen = set()
         queue: List[BellEndpoint] = []
         for ep in [self.preferred, *BELL_FALLBACKS]:
+            # Skip known-dead hosts
+            if ep.host.lower() in {"smtp.sympatico.ca", "smtp.bell.net"}:
+                continue
             key = (ep.host.lower(), ep.port, ep.security)
             if key in seen:
                 continue
@@ -122,7 +137,7 @@ class BellSympaticoTransport(BaseTransport):
 
         server = smtplib.SMTP(ep.host, ep.port, timeout=timeout)
         server.ehlo()
-        if ep.security == "starttls" or ep.port == 587:
+        if ep.security == "starttls" or ep.port in {587, 25}:
             ctx = ssl.create_default_context()
             server.starttls(context=ctx)
             server.ehlo()
@@ -130,10 +145,6 @@ class BellSympaticoTransport(BaseTransport):
 
     @staticmethod
     def _classify(exc: Exception) -> Tuple[str, str]:
-        """
-        Returns (kind, message) where kind is:
-          auth | timeout | closed | network | other
-        """
         if isinstance(exc, smtplib.SMTPAuthenticationError):
             detail = ""
             try:
@@ -148,15 +159,32 @@ class BellSympaticoTransport(BaseTransport):
             return (
                 "auth",
                 "Bell rejected username/password. "
-                "Confirm full email + webmail password (or app password). "
+                "Confirm full email + webmail password. "
                 f"Server: {detail or 'authentication failed'}",
             )
 
         text = str(exc)
         lower = text.lower()
 
-        if isinstance(exc, (socket.timeout, TimeoutError)) or "timed out" in lower or "timeout" in lower:
-            return "timeout", f"Timed out reaching Bell SMTP ({text})"
+        if "getaddrinfo failed" in lower or "name or service not known" in lower:
+            return "network", f"DNS failed for Bell SMTP host ({text})"
+
+        if "connection refused" in lower or "ected refused" in lower or "10061" in lower:
+            return (
+                "network",
+                "Connection refused by Bell SMTP (port blocked or Bell rejecting this network).",
+            )
+
+        if (
+            isinstance(exc, (socket.timeout, TimeoutError))
+            or "timed out" in lower
+            or "timeout" in lower
+            or "10060" in lower
+        ):
+            return (
+                "timeout",
+                "Timed out reaching Bell SMTP (firewall, VPN, or Bell blocking this IP).",
+            )
 
         if "connection unexpectedly closed" in lower:
             return "closed", f"Bell closed the connection early ({text})"
@@ -167,11 +195,6 @@ class BellSympaticoTransport(BaseTransport):
         return "other", text
 
     def _login_with_fallback(self) -> Tuple[Optional[smtplib.SMTP], Optional[str], List[str]]:
-        """
-        Try preferred + fallbacks.
-        Stop immediately on AUTH failure (credentials won't work on other ports).
-        Continue on network/TLS issues.
-        """
         trail: List[str] = []
 
         for ep in self._endpoint_queue():
@@ -187,11 +210,7 @@ class BellSympaticoTransport(BaseTransport):
                 logger.error("Bell SMTP %s failed (%s): %s", ep.label, kind, exc)
 
                 if kind == "auth":
-                    # Same credentials will fail on every endpoint.
-                    trail.insert(
-                        0,
-                        "Authentication rejected — not trying further endpoints.",
-                    )
+                    trail.insert(0, "Authentication rejected — not trying further endpoints.")
                     return None, None, trail
 
         return None, None, trail
@@ -212,13 +231,19 @@ class BellSympaticoTransport(BaseTransport):
                 message=f"Bell Sympatico connected via {label}.",
             )
 
+        # All failures were network/timeout — not credentials
+        network_only = all(
+            any(k in t.lower() for k in ("network", "timed out", "timeout", "refused", "dns"))
+            for t in trail
+        ) if trail else True
+
         summary = " | ".join(trail[-3:]) if trail else "Unknown failure"
-        retryable = not any("Authentication rejected" in t or "rejected username/password" in t for t in trail)
-        return self.failure_result(
-            status="FAILED",
-            message=f"Bell connection failed. {summary}",
-            retryable=retryable,
-        )
+        if network_only:
+            message = f"Bell SMTP unreachable from this network. {NETWORK_BLOCK_HINT} Details: {summary}"
+        else:
+            message = f"Bell connection failed. {summary}"
+
+        return self.failure_result(status="FAILED", message=message, retryable=True)
 
     def send_email(
         self,
@@ -235,6 +260,10 @@ class BellSympaticoTransport(BaseTransport):
         if not valid:
             return self.failure_result(status="FAILED", message=error, retryable=False)
 
+        final_html = inject_tracking_pixel(html_body or "", tracking_id, tracking_domain)
+        if not text_body:
+            text_body = html_to_text(final_html)
+
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject or ""
         msg["From"] = formataddr((self.from_name, self.from_email)) if self.from_name else self.from_email
@@ -246,19 +275,6 @@ class BellSympaticoTransport(BaseTransport):
             msg["X-MSMail-Priority"] = "High"
             msg["Importance"] = "High"
 
-        final_html = html_body or ""
-        if tracking_id and tracking_domain:
-            pixel = (
-                f'<img src="{tracking_domain.rstrip("/")}/api/track?id={tracking_id}" '
-                f'alt="" width="1" height="1" style="display:none;"/>'
-            )
-            lower = final_html.lower()
-            if "</body>" in lower:
-                idx = lower.rfind("</body>")
-                final_html = final_html[:idx] + pixel + final_html[idx:]
-            else:
-                final_html += pixel
-
         if text_body:
             msg.attach(MIMEText(text_body, "plain", "utf-8"))
         if final_html:
@@ -269,7 +285,7 @@ class BellSympaticoTransport(BaseTransport):
             summary = " | ".join(trail[-3:]) if trail else "Unknown failure"
             return self.failure_result(
                 status="FAILED",
-                message=f"Bell send failed. {summary}",
+                message=f"Bell send failed (network). {NETWORK_BLOCK_HINT} Details: {summary}",
                 retryable=True,
             )
 
