@@ -154,28 +154,35 @@ async def update_campaign_status(campaign_id: int, request: Request, db: Session
     if not new_status or new_status not in ["draft", "running", "paused", "completed", "stopped"]:
         raise HTTPException(status_code=400, detail="Invalid status")
 
+    # Apply status first and COMMIT so the worker thread sees "running"
+    # in its own DB session (avoids race: worker starts, reads old draft/stopped).
     campaign.status = new_status
     if new_status == "running":
         if not campaign.started_at:
             campaign.started_at = datetime.utcnow()
-        CampaignEngine.start_campaign(campaign.id)
     elif new_status == "paused":
         campaign.paused_at = datetime.utcnow()
-        try:
-            CampaignEngine.pause_campaign(campaign.id)
-        except Exception:
-            pass
     elif new_status == "completed":
         campaign.completed_at = datetime.utcnow()
     elif new_status == "stopped":
         campaign.stopped_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(campaign)
+
+    # Start / stop worker AFTER the status is durable
+    if new_status == "running":
+        CampaignEngine.start_campaign(campaign.id)
+    elif new_status == "paused":
+        try:
+            CampaignEngine.pause_campaign(campaign.id)
+        except Exception:
+            pass
+    elif new_status == "stopped":
         try:
             CampaignEngine.stop_campaign(campaign.id)
         except Exception:
             pass
-
-    db.commit()
-    db.refresh(campaign)
 
     log = ActivityLog(
         event_type=f"campaign_{new_status}",
